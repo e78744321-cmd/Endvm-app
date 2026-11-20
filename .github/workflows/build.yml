@@ -1,0 +1,88 @@
+name: Build Endvm 2 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Новый запуск отменяет предыдущий для той же ветки
+concurrency:
+  group: build-endvm2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Фиксируем версию образа: ubuntu-latest переезжает на новую Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Если в проекте есть gradlew, используем версию Gradle из проекта.
+      # Жёстко заданный Gradle 8.9 ломает сборку, если Android Gradle Plugin
+      # в проекте требует более новый Gradle.
+      - name: Setup Gradle (project wrapper)
+        if: hashFiles('**/gradlew') != ''
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Gradle 8.9 (no wrapper in project)
+        if: hashFiles('**/gradlew') == ''
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build APK
+        run: |
+          set -eu
+
+          WRAPPER="$(find . -name gradlew -not -path '*/node_modules/*' | head -n 1)"
+
+          if [ -n "$WRAPPER" ]; then
+            cd "$(dirname "$WRAPPER")"
+            # на случай Windows-переводов строк и потерянного бита исполнения
+            sed -i 's/\r$//' gradlew
+            chmod +x gradlew
+            ./gradlew --no-daemon --stacktrace assembleDebug
+          else
+            SETTINGS="$(find . -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
+            if [ -z "$SETTINGS" ]; then
+              echo "::error::Не найден ни gradlew, ни settings.gradle(.kts)"
+              exit 1
+            fi
+            cd "$(dirname "$SETTINGS")"
+            gradle --no-daemon --stacktrace assembleDebug
+          fi
+
+      # Путь не привязан к модулю app и к имени файла
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Endvm2-debug-apk
+          path: "**/build/outputs/apk/debug/*.apk"
+          if-no-files-found: error
+
+      - name: Upload Gradle reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-reports
+          path: |
+            **/build/reports/**
+          if-no-files-found: ignore
+          retention-days: 7
+          
