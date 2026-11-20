@@ -18,6 +18,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Extract project ZIP
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -type f -name '*.zip' | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: ZIP archive not found!"
+            exit 1
+          fi
+
+          echo "Extracting: $ZIP_FILE"
+          mkdir -p extracted
+          unzip -q "$ZIP_FILE" -d extracted
+
+          echo "Extracted files:"
+          find extracted -maxdepth 4 -type f | head -100
+
+      - name: Find Android project
+        run: |
+          PROJECT_DIR=$(find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -not -path '*/.gradle/*' \
+            -printf '%h\n' | head -n 1)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: settings.gradle not found in ZIP!"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found project: $PROJECT_DIR"
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -37,29 +68,18 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Find Android project
-        run: |
-          PROJECT_DIR=$(find . -type f \( -name settings.gradle -o -name settings.gradle.kts \) \
-            -not -path '*/.gradle/*' \
-            -printf '%h\n' | head -n 1)
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Gradle project not found!"
-            echo "Repository contents:"
-            find . -maxdepth 4 -type f | head -200
-            exit 1
-          fi
-
-          echo "Found project: $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
       - name: Build APK
         run: gradle --no-daemon -p "$PROJECT_DIR" assembleDebug
+
+      - name: Prepare APK
+        run: |
+          mkdir -p dist
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" dist/Endvm2.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Endvm2-debug-apk
-          path: '**/app/build/outputs/apk/debug/app-debug.apk'
+          name: Endvm2-APK
+          path: dist/Endvm2.apk
           if-no-files-found: error
           
