@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -33,40 +33,69 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # Если в проекте есть gradlew, используем версию Gradle из проекта.
-      # Жёстко заданный Gradle 8.9 ломает сборку, если Android Gradle Plugin
-      # в проекте требует более новый Gradle.
-      - name: Setup Gradle (project wrapper)
-        if: hashFiles('**/gradlew') != ''
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Setup Gradle 8.9 (no wrapper in project)
-        if: hashFiles('**/gradlew') == ''
+      # Gradle 8.9 нужен как запасной вариант, если в проекте нет рабочего gradlew.
+      # Если gradlew есть, сборка идёт на версии Gradle из проекта.
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
       - name: Build APK
         run: |
-          set -eu
+          set -u
 
-          WRAPPER="$(find . -name gradlew -not -path '*/node_modules/*' | head -n 1)"
+          run_build() {
+            echo "== Gradle-файлы в репозитории =="
+            find . -maxdepth 4 \
+              \( -name 'settings.gradle*' -o -name 'build.gradle*' -o -name 'gradlew' -o -name 'gradle-wrapper.*' \) \
+              -not -path './.git/*' | sort
+            echo "================================"
 
-          if [ -n "$WRAPPER" ]; then
-            cd "$(dirname "$WRAPPER")"
-            # на случай Windows-переводов строк и потерянного бита исполнения
-            sed -i 's/\r$//' gradlew
-            chmod +x gradlew
-            ./gradlew --no-daemon --stacktrace assembleDebug
-          else
-            SETTINGS="$(find . -maxdepth 3 -name 'settings.gradle*' | head -n 1)"
-            if [ -z "$SETTINGS" ]; then
-              echo "::error::Не найден ни gradlew, ни settings.gradle(.kts)"
-              exit 1
+            # Ищем корень Gradle-проекта: сначала корень репозитория, потом подпапки
+            PROJECT_DIR=""
+            if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
+              PROJECT_DIR="."
+            else
+              PROJECT_FILE="$(find . -maxdepth 3 -name 'settings.gradle*' -not -path './.git/*' | sort | head -n 1)"
+              if [ -n "$PROJECT_FILE" ]; then
+                PROJECT_DIR="$(dirname "$PROJECT_FILE")"
+              fi
             fi
-            cd "$(dirname "$SETTINGS")"
-            gradle --no-daemon --stacktrace assembleDebug
+
+            if [ -z "$PROJECT_DIR" ]; then
+              echo "ERROR: в репозитории нет settings.gradle или settings.gradle.kts, Gradle-проект не найден"
+              return 1
+            fi
+
+            cd "$PROJECT_DIR"
+            echo "Папка проекта: $(pwd)"
+
+            if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+              # на случай Windows-переводов строк и потерянного бита исполнения
+              sed -i 's/\r$//' gradlew
+              chmod +x gradlew
+              ./gradlew --no-daemon --stacktrace assembleDebug
+            else
+              echo "gradlew или gradle/wrapper/gradle-wrapper.jar отсутствует, использую Gradle 8.9"
+              gradle --no-daemon --stacktrace assembleDebug
+            fi
+          }
+
+          run_build 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          STATUS="${PIPESTATUS[0]}"
+
+          # Итог показываем прямо на странице запуска (Summary)
+          if [ "$STATUS" -ne 0 ]; then
+            {
+              echo "### Сборка упала (код $STATUS)"
+              echo "Последние строки лога:"
+              echo '```'
+              tail -n 60 "$GITHUB_WORKSPACE/build.log"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
+
+          exit "$STATUS"
 
       # Путь не привязан к модулю app и к имени файла
       - name: Upload APK
@@ -76,12 +105,13 @@ jobs:
           path: "**/build/outputs/apk/debug/*.apk"
           if-no-files-found: error
 
-      - name: Upload Gradle reports on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: gradle-reports
+          name: gradle-logs
           path: |
+            build.log
             **/build/reports/**
           if-no-files-found: ignore
           retention-days: 7
